@@ -1,8 +1,11 @@
+import io
+import random
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -31,6 +34,65 @@ class PlanTests(unittest.TestCase):
         moments = [Moment(10, 11, 10, -9), Moment(30, 31, 30, -2), Moment(60, 61, 60, -5)]
         clips = plan_clips(moments, duration=100, top=2)
         self.assertEqual([c.start for c in clips], [25.0, 55.0])
+
+    def test_merged_clip_never_exceeds_max_len(self):
+        # Regression: these used to merge into one 17 s clip (15-32 s) despite max_len=10.
+        moments = [Moment(20, 21, 20, -5), Moment(28, 29, 28, -4)]
+        clips = plan_clips(moments, duration=100, max_len=10)
+        self.assertEqual([(c.start, c.end) for c in clips], [(15.0, 24.0), (24.0, 32.0)])
+        self.assertTrue(all(c.duration <= 10 for c in clips))
+
+    def test_clips_respect_max_len_and_do_not_overlap(self):
+        rng = random.Random(1234)
+        for _ in range(500):
+            duration = rng.uniform(5, 300)
+            max_len = rng.uniform(2, 40)
+            moments = []
+            for _ in range(rng.randint(0, 25)):
+                start = rng.uniform(0, duration)
+                end = min(duration, start + rng.uniform(0.5, 30))
+                moments.append(Moment(start, end, rng.uniform(start, end), rng.uniform(-30, 0)))
+            clips = plan_clips(moments, duration, rng.uniform(0, 10), rng.uniform(0, 10), max_len)
+            for c in clips:
+                self.assertLessEqual(c.duration, max_len + 1e-9)
+                self.assertGreaterEqual(c.start, 0)
+                self.assertLessEqual(c.end, duration + 1e-9)
+            for a, b in zip(clips, clips[1:]):
+                self.assertLessEqual(a.end, b.start + 1e-9)
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
+class BadInputTests(unittest.TestCase):
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_corrupted_file_gives_clear_error(self):
+        # Regression: ffprobe failure used to raise an unhandled CalledProcessError.
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "broken.mp4"
+            bad.write_bytes(bytes(random.Random(7).getrandbits(8) for _ in range(4096)))
+            code, _, err = self.run_cli(str(bad), "-o", str(Path(tmp) / "clips"))
+        self.assertNotEqual(code, 0)
+        self.assertIn("error: could not read", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_empty_file_gives_clear_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "empty.mp4"
+            bad.touch()
+            code, _, err = self.run_cli(str(bad))
+        self.assertNotEqual(code, 0)
+        self.assertTrue(err.startswith("error: "))
+
+    def test_video_duration_raises_runtime_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "broken.mkv"
+            bad.write_text("not a video")
+            with self.assertRaises(RuntimeError):
+                video_duration(str(bad))
 
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")

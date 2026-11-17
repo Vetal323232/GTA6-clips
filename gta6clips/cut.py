@@ -22,11 +22,23 @@ class Clip:
 
 
 def video_duration(video: str) -> float:
-    out = subprocess.run(
+    """Return the video's length in seconds, or raise RuntimeError if unreadable."""
+    result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", video],
-        capture_output=True, text=True, check=True,
-    ).stdout
-    return float(json.loads(out)["format"]["duration"])
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"ffprobe exited with code {result.returncode}"
+        raise RuntimeError(
+            f"could not read {video}. Is it a valid, non-corrupted video file?\n{detail}"
+        )
+    try:
+        duration = float(json.loads(result.stdout)["format"]["duration"])
+    except (ValueError, KeyError, TypeError) as e:
+        raise RuntimeError(f"could not determine the length of {video} ({e})") from None
+    if duration <= 0:
+        raise RuntimeError(f"{video} has no playable length")
+    return duration
 
 
 def plan_clips(
@@ -37,20 +49,30 @@ def plan_clips(
     max_len: float = 60.0,
     top: int | None = None,
 ) -> list[Clip]:
-    """Pad each moment, clamp to the video, merge overlaps, keep the loudest."""
+    """Pad each moment, clamp to the video, merge overlaps, keep the loudest.
+
+    Guarantees every clip is at most `max_len` seconds and clips never overlap.
+    Overlapping moments are merged only while the merged clip still fits in
+    `max_len`; otherwise the next clip starts where the previous one ends.
+    """
     clips: list[Clip] = []
     for m in sorted(moments, key=lambda m: m.start):
         start = max(0.0, m.start - before)
         end = min(duration, m.end + after)
         if end - start > max_len:  # very long loud stretch: centre on the peak
-            start = max(0.0, m.peak_time - max_len / 2)
+            start = max(0.0, min(m.peak_time - max_len / 2, duration - max_len))
             end = min(duration, start + max_len)
         if clips and start <= clips[-1].end:
             prev = clips[-1]
-            prev.end = max(prev.end, end)
-            prev.peak_db = max(prev.peak_db, m.peak_db)
-        else:
-            clips.append(Clip(start, end, m.peak_db))
+            if end <= prev.end:  # fully inside the previous clip
+                prev.peak_db = max(prev.peak_db, m.peak_db)
+                continue
+            if end - prev.start <= max_len:
+                prev.end = end
+                prev.peak_db = max(prev.peak_db, m.peak_db)
+                continue
+            start = prev.end  # too long to merge: continue right after
+        clips.append(Clip(start, end, m.peak_db))
     if top is not None:
         keep = sorted(clips, key=lambda c: c.peak_db, reverse=True)[:top]
         clips = sorted(keep, key=lambda c: c.start)

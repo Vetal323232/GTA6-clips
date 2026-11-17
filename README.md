@@ -53,7 +53,7 @@ gta6clips my_session.mp4 --dry-run
 | `--min-db DB` | off | Use a fixed loudness threshold in dBFS instead, e.g. `-12` |
 | `-n, --top N` | all | Only keep the N loudest clips |
 | `--merge-gap SEC` | `3` | Loud moments closer than this become one clip |
-| `--max-len SEC` | `60` | Longest allowed clip |
+| `--max-len SEC` | `60` | Longest allowed clip. Overlapping highlights are only merged while the result fits; otherwise the next clip starts where the previous one ends |
 | `--window SEC` | `0.5` | Size of the loudness analysis window |
 | `--copy` | off | Stream-copy instead of re-encoding. Much faster, but cuts snap to keyframes so they can be a few seconds off |
 | `--dry-run` | off | Only list the detected highlights |
