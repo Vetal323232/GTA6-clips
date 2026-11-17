@@ -18,6 +18,13 @@ class RangeInvariantTests(unittest.TestCase):
         self.assertEqual(len(out), 2)
         self.assertLessEqual(out[0].end, out[1].start)
 
+    def test_target_min_takes_real_context_only(self):
+        self.assertEqual(initial_range(50, (50, 51), 200, 3, 2, 60, 20), (38.6, 58.6))
+        s, e = initial_range(2, (2, 3), 200, 3, 2, 60, 20)
+        self.assertEqual((s, e), (0.0, 20.0))
+        s, e = initial_range(5, (5, 6), 8, 3, 2, 60, 20)  # source is only 8 s: no stretching
+        self.assertEqual((s, e), (0.0, 8.0))
+
     def test_fit_around_keeps_anchor(self):
         s, e = fit_around(50, 0, 100, 100, 20)
         self.assertLessEqual(e - s, 20)
@@ -32,7 +39,8 @@ class RangeInvariantTests(unittest.TestCase):
             for _ in range(rng.randint(0, 30)):
                 anchor = rng.uniform(0, duration)
                 ext = (max(0, anchor - rng.uniform(0, 20)), min(duration, anchor + rng.uniform(0, 20)))
-                s, e = initial_range(anchor, ext, duration, rng.uniform(0, 15), rng.uniform(0, 15), max_len)
+                s, e = initial_range(anchor, ext, duration, rng.uniform(0, 15), rng.uniform(0, 15), max_len,
+                                     rng.choice([0, 20, 80]))
                 if e <= s:
                     continue
                 r = Range(s, e, anchor, rng.random(), ext)

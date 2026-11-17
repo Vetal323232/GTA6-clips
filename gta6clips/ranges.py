@@ -37,10 +37,26 @@ def check_range(r: Range, duration: float, max_len: float) -> bool:
 
 
 def initial_range(anchor: float, extent: tuple[float, float], duration: float,
-                  before: float, after: float, max_len: float) -> tuple[float, float]:
-    """Pad the event extent, clamp to the source and fit into max_len around the anchor."""
+                  before: float, after: float, max_len: float, target_min: float = 0.0) -> tuple[float, float]:
+    """Pad the event extent, clamp to the source and fit into max_len around the anchor.
+
+    If the result is shorter than target_min, more real context is taken from
+    both sides (as far as the source allows). Footage is never stretched.
+    """
     start = max(0.0, extent[0] - before)
     end = min(duration, extent[1] + after)
+    goal = min(target_min, max_len)
+    if end - start < goal:
+        missing = goal - (end - start)
+        total = before + after
+        share = before / total if total > 0 else 0.5
+        start = max(0.0, start - missing * share)
+        end = min(duration, end + missing * (1 - share))
+        if end - start < goal:  # hit a source edge: take the rest from the other side
+            if start <= 0.0:
+                end = min(duration, start + goal)
+            else:
+                start = max(0.0, end - goal)
     start, end = fit_around(anchor, start, end, duration, max_len)
     return start, end
 

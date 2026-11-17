@@ -19,7 +19,7 @@ import numpy as np
 from .ranges import Range, adjust_boundaries, initial_range, resolve_overlaps
 from .signals import SILENCE_DB, Features
 
-DETECTOR_VERSION = "m1.1"
+DETECTOR_VERSION = "m1.2"
 
 SIGNAL_LABELS = {
     "loud_global": "громкость относительно всей записи",
@@ -223,7 +223,8 @@ def detect(f: Features, cfg: dict, transcript_segments=None, cues: list[Cue] | N
         idx = g[int(np.argmax(score[g]))]
         anchor = min(duration, (idx + 0.5) * f.window)
         extent = (g[0] * f.window, min(duration, (g[-1] + 1) * f.window))
-        s, e = initial_range(anchor, extent, duration, a["before"], a["after"], max_len)
+        s, e = initial_range(anchor, extent, duration, a["before"], a["after"], max_len,
+                             float(a.get("target_min", 0)))
         r = Range(s, e, anchor, float(score[idx]) + 0.02 * min(10, len(g)), extent)
         r = adjust_boundaries(r, duration, max_len, speech_bounds, scene_cuts)
         ranges.append(r)
