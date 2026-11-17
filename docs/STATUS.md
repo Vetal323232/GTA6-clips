@@ -2,7 +2,7 @@
 
 Execution environment for every check below: cloud Linux (Ubuntu 24.04.5, x86_64, 4 CPU, 15 GB RAM, no GPU),
 Python 3.13.18, FFmpeg 6.1.1. **Nothing was run on Windows 11.** Full suite:
-`.venv/bin/python -m unittest discover -s tests` → 50 tests OK (also OK with system Python without speech packages, 1 browser test skipped).
+`.venv/bin/python -m unittest discover -s tests` → 53 tests OK (also OK with system Python without speech packages: 2 skipped — browser and real-VAD recovery).
 
 | Requirement | Implemented / Partial / Missing | Verified / Partially verified / Unverified | Evidence | Notes |
 | --- | --- | --- | --- | --- |
@@ -11,6 +11,8 @@ Python 3.13.18, FFmpeg 6.1.1. **Nothing was run on Windows 11.** Full suite:
 | 1. Model cache/download docs, size estimate | Implemented | Unverified | `gta6clips/speech.py` `ESTIMATED_MODEL_SIZE`, README | huggingface.co blocked by network policy; ≈480 MB is an estimate |
 | 2A. Single file and folder import, Cyrillic/space paths | Implemented | Verified | `test_app.py::test_import_dedupe_and_cyrillic_paths`, `test_ui_smoke.py` | Path typed into UI (browser can't expose full paths) |
 | 2A. Works without Twitch, transcription can be disabled, missing model non-fatal | Implemented | Verified | `test_missing_model_is_reported_not_fatal`; manual run with blocked download → "распознавание недоступно", analysis done | |
+| 2A. Recovery after unavailable speech/VAD (retry, cache reuse, decisions kept) | Implemented | Verified (stand-in model) | `SpeechRecoveryTests`, `RetryButtonTests` in `tests/test_speech_subs.py` | Analysis marked incomplete; retried on rerun or via UI button; old analysis kept (`superseded_by`) |
+| 8. Install instructions for the unmerged PR branch | Implemented | Partially verified | `git clone --branch claude/project-thread-b4clfe …` and the switch/pull sequence run on Linux git; branch checked with `git ls-remote` | PowerShell itself not run |
 | 2A. Attribution + usage notes | Implemented | Partially verified | `sources.attribution/usage_notes`, UI form | Stored/displayed; no dedicated test |
 | 2B/2C. Twitch discovery and retrieval | Missing | — | — | Этап 2 by design; nullable platform columns already in `sources` |
 | 3. Baseline audio-peak detector retained | Implemented | Verified | legacy CLI + `test_clips.py`; `loud_global` signal in `scoring.py` | |
@@ -45,17 +47,18 @@ Python 3.13.18, FFmpeg 6.1.1. **Nothing was run on Windows 11.** Full suite:
 | 9. Both reported regressions | Implemented | Verified | pre-fix worktree `3431477`: 2 FAIL + 3 ERROR; head: OK | |
 | 9. Browser smoke test | Implemented | Verified | `test_ui_smoke.py` (Playwright, headless Chromium 153) | |
 
-## Memory and time (synthetic, low resolution, speech disabled)
+## Analysis time and memory (not full-pipeline throughput)
 
-`tools/measure_memory.py --minutes 10 60`: separate `gta6clips analyze` process per file, RSS of the whole process tree
-sampled every 0.1 s. Signals: loudness, VAD (Silero), scene change at 2 fps. 160x90, 10 fps, AAC.
+`tools/measure_memory.py --minutes 10 60` measures **analysis only**: a synthetic 160x90, 10 fps source, Whisper **disabled**,
+**no vertical export**. Signals: loudness, VAD (Silero), scene change at 2 fps. Each file runs in its own `gta6clips analyze`
+process, and RSS of the whole process tree is sampled every 0.1 s. Run on the code at this status update.
 
-| Input | Wall time | Peak tree RSS | Python / ffmpeg at peak | Candidates |
+| Input | Analysis wall time | Peak tree RSS | Python / ffmpeg at peak | Candidates |
 | --- | --- | --- | --- | --- |
-| 10 min (15.7 MB) | 6.5 s | 206.6 MB | 148.2 / 58.4 MB | 2 |
-| 60 min (94.3 MB) | 33.5 s | 204.6 MB | 148.5 / 56.1 MB | 10 |
+| 10 min (15.7 MB) | 8.1 s | 220.6 MB | 162.0 / 58.6 MB | 2 |
+| 60 min (94.3 MB) | 35.7 s | 220.6 MB | 164.4 / 56.3 MB | 10 |
 
-The peak doesn't grow with duration. Allocations that do depend on duration are per-window arrays (a few float32 values per 0.5 s, so ~7,200 per hour), the scene-score array, VAD segment list and a rolling-median window view (~3.5 MB per hour while scoring). Model loading isn't included because speech was disabled. Time on full-resolution footage wasn't measured.
+The peak doesn't grow with duration. Allocations that do depend on duration are per-window arrays (a few float32 values per 0.5 s, so ~7,200 per hour), the scene-score array, VAD segment list and a rolling-median window view (~3.5 MB per hour while scoring). These numbers don't cover Whisper model loading or transcription time, rendering, real full-resolution footage, or Windows.
 
 ## Implementation decisions
 
@@ -64,4 +67,5 @@ The peak doesn't grow with duration. Allocations that do depend on duration are 
 - Paths are typed or pasted rather than chosen in a browser file picker, because browsers don't expose full local paths.
 - Burned subtitles: ffmpeg runs with `cwd` set to a temp folder and a relative `subs.srt`, which avoids escaping `C:\` in filtergraph syntax.
 - Speech is transcribed in 300 s chunks to keep memory bounded. A word that falls across a chunk boundary can be lost, and the UI shows this note.
+- Incomplete analyses (speech or VAD requested but unavailable for a fixable reason) aren't served from cache. They're retried only if the missing runtime can now be imported, and the result supersedes the old analysis (kept in the DB) with decisions carried over by anchor ±1 s.
 - One background worker runs jobs one at a time, so the UI stays responsive. Jobs are deduplicated by a key built from parameters.
