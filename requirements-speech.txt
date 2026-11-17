@@ -1,0 +1,5 @@
+# Необязательно: локальное распознавание речи (faster-whisper / CTranslate2) и VAD (Silero через onnxruntime).
+# Работает на CPU. Для GPU нужны дополнительно библиотеки NVIDIA (см. README, раздел «GPU»).
+faster-whisper==1.2.1
+ctranslate2==4.9.0
+onnxruntime==1.32.0

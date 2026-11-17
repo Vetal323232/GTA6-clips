@@ -1,97 +1,149 @@
 # GTA6 clips
 
-Automatically cut highlight clips out of long GTA 6 gameplay recordings.
+Локальная программа для поиска и нарезки интересных моментов из записей геймплея (в первую очередь GTA VI).
 
-The tool listens to the video's audio track. Explosions, gunfire, crashes and
-other loud moments stand out from normal gameplay, so every loudness peak is
-treated as a highlight. Each highlight is cut into its own clip with a few
-seconds of padding before and after, using ffmpeg.
+Порядок работы: **импорт записей → анализ кандидатов → просмотр и правка → экспорт выбранных клипов**.
 
-## Requirements
+- Всё работает на вашем компьютере: Python, FFmpeg, SQLite и бесплатные локальные модели. Платные AI‑API и облачные сервисы не используются. Claude для работы программы не нужен.
+- Громкий звук считается только **признаком** возможного момента, а не доказательством. Решение о том, что интересно, остаётся за вами.
+- Twitch: **Этап 2**, пока не реализован.
 
-- Python 3.9 or newer
-- [ffmpeg](https://ffmpeg.org/download.html) (both `ffmpeg` and `ffprobe` on your PATH)
-  - Windows: `winget install ffmpeg`
-  - macOS: `brew install ffmpeg`
-  - Linux: `sudo apt install ffmpeg`
+> **Что проверено.** Код и тесты запускались только в облачном Linux (Ubuntu 24.04, Python 3.13, FFmpeg 6.1, без GPU). Команды PowerShell ниже составлены по документации и **на Windows не запускались**. Распознавание речи на настоящей модели не проверено: в среде разработки загрузка моделей с Hugging Face была заблокирована. Подробности — в [docs/STATUS.md](docs/STATUS.md).
 
-No Python packages are needed.
+## Установка в Windows 11 (PowerShell)
 
-## Install
+### 1. Python 3.12 и FFmpeg
 
-```bash
+Нужна установка в систему. Если они уже есть, этот шаг можно пропустить:
+
+```powershell
+winget install --id Python.Python.3.12 -e
+winget install --id Gyan.FFmpeg -e
+```
+
+Идентификаторы `Python.Python.3.12` и `Gyan.FFmpeg` сверены с репозиторием манифестов winget (microsoft/winget-pkgs). Сам `winget` при разработке не запускался.
+После установки **закройте и откройте PowerShell заново**, чтобы обновился `PATH`. Проверка:
+
+```powershell
+py -3.12 --version
+ffmpeg -version
+```
+
+### 2. Программа и зависимости (локально, в папке проекта)
+
+```powershell
 git clone https://github.com/Vetal323232/GTA6-clips.git
 cd GTA6-clips
-pip install -e .
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-speech.txt
+.\.venv\Scripts\python.exe -m pip install -e .
+Copy-Item config.example.toml config.toml
 ```
 
-You can also run it without installing: `python -m gta6clips VIDEO`.
+Все Python‑пакеты ставятся только в `.venv` внутри проекта. Активировать окружение не обязательно: команды выше вызывают `.\.venv\Scripts\python.exe` напрямую, поэтому настройка `ExecutionPolicy` не нужна.
 
-## Usage
+`requirements-speech.txt` добавляет распознавание речи (faster‑whisper) и определение речи и тишины (VAD). Без этих пакетов программа тоже работает, но только по звуку и изображению. Тогда ставьте только `requirements.txt`.
 
-```bash
-gta6clips my_session.mp4
+### 3. Проверка и запуск
+
+```powershell
+.\.venv\Scripts\python.exe -m gta6clips doctor
+.\.venv\Scripts\python.exe -m gta6clips serve
 ```
 
-Clips are written to `./clips/`, named like `my_session_clip001_754s.mp4`
-(the number is the clip's start time in the original video).
+`serve` запускает интерфейс по адресу <http://127.0.0.1:8765/> и открывает браузер. Сервер доступен только с этого компьютера. Остановить его можно клавишами `Ctrl+C` в окне PowerShell. Если порт занят, укажите другой: `serve --port 8766`.
 
-Preview what would be cut, without writing anything:
+## Работа в интерфейсе
 
-```bash
-gta6clips my_session.mp4 --dry-run
+1. **Импорт.** Вставьте полный путь к файлу или к папке с записями, например `D:\Записи\GTA VI`. Браузер не сообщает программе полный путь из окна выбора файла, поэтому путь вводится текстом. В Проводнике его можно скопировать так: Shift + правый клик → «Копировать как путь». Кавычки по краям допустимы. Из папки берутся `mp4, mkv, mov, avi, webm, flv, ts, m4v, wmv`, при желании вместе с вложенными папками. Повреждённые файлы попадают в список ошибок, остальные импортируются. Можно указать автора или источник и права на использование. Эти данные сохраняются вместе с записью.
+2. **Анализ.** На странице записи выберите настройки и нажмите «Запустить анализ». Ход анализа виден на полосе прогресса, задачу можно отменить. Обновление страницы не создаёт повторную задачу. Если кандидатов нет, например запись тихая, это нормальный результат, а не ошибка.
+3. **Просмотр.** У каждого кандидата есть плеер, объяснение выбора на русском, вклад каждого сигнала и список недоступных сигналов. Можно поправить начало и конец: кнопка «← текущее время» берёт время из плеера. Кандидата можно принять или отклонить и указать причину. Ваши правки не отменяются. Если вы исключили ключевой момент из клипа или сделали клип длиннее максимума, программа покажет предупреждение.
+4. **Вид кадра.** По умолчанию весь кадр вписывается в вертикальное видео 1080×1920 поверх размытого фона, поэтому HUD и миникарта не обрезаются. В режимах «Выбранная область» обрезка настраивается ползунками, а превью обновляется сразу.
+5. **Экспорт.** Готовый клип — MP4 (H.264 + AAC), громкость нормализуется до −14 LUFS с ограничением пиков. За один запуск можно экспортировать до 5 клипов, это значение настраивается. Рядом с клипом сохраняется `.srt`, если есть расшифровка речи. Субтитры можно вшить в видео. Кнопка «Открыть папку экспорта» открывает папку в Проводнике.
+6. **Оценка.** Можно вручную отметить интересные интервалы записи. Страница «Оценка качества» показывает, сколько кандидатов принято среди первых K, сколько ещё не просмотрено и какие отмеченные моменты программа пропустила.
+
+### Без интерфейса
+
+```powershell
+.\.venv\Scripts\python.exe -m gta6clips analyze "D:\Записи\GTA VI\сессия.mp4" --no-speech
+.\.venv\Scripts\python.exe -m gta6clips "D:\Записи\GTA VI\сессия.mp4" --dry-run   # быстрый режим старого прототипа, без базы
 ```
 
-### Options
+## Как выбираются моменты
 
-| Option | Default | What it does |
+Сигналы считаются по окнам длиной 0,5 с. Звук и изображение декодируются потоком, поэтому длинная запись не загружается в память целиком.
+
+| Сигнал | Роль | Когда недоступен |
 | --- | --- | --- |
-| `-o, --out DIR` | `clips` | Output folder |
-| `-b, --before SEC` | `5` | Seconds kept before each highlight |
-| `-a, --after SEC` | `3` | Seconds kept after each highlight |
-| `-s, --sensitivity N` | `2.0` | How much louder than normal a moment must be (in standard deviations). Lower finds more clips, higher finds fewer |
-| `--min-db DB` | off | Use a fixed loudness threshold in dBFS instead, e.g. `-12` |
-| `-n, --top N` | all | Only keep the N loudest clips |
-| `--merge-gap SEC` | `3` | Loud moments closer than this become one clip |
-| `--max-len SEC` | `60` | Longest allowed clip. Overlapping highlights are only merged while the result fits; otherwise the next clip starts where the previous one ends |
-| `--window SEC` | `0.5` | Size of the loudness analysis window |
-| `--copy` | off | Stream-copy instead of re-encoding. Much faster, but cuts snap to keyframes so they can be a few seconds off |
-| `--dry-run` | off | Only list the detected highlights |
+| Громкость относительно всей записи (исходный детектор) | запускает кандидата | нет звуковой дорожки |
+| Громкость относительно локального фона (медиана за 30 с) | запускает кандидата | нет звука |
+| Резкий рост громкости | запускает кандидата | нет звука |
+| Речь и тишина (VAD Silero) | дополнительный признак и границы клипа | пакет faster‑whisper не установлен |
+| Расшифровка речи и ключевые фразы на русском и английском | фраза запускает кандидата | распознавание выключено или модель недоступна |
+| Смена сцены (уменьшенное изображение, 2 к/с) | дополнительный признак, может подсказать начало клипа | выключено в настройках |
+| HUD‑детектор (подключаемый модуль) | дополнительный признак | по умолчанию выключен, шаблонов для GTA VI нет |
 
-### Examples
+Оценка кандидата — взвешенная сумма нормированных сигналов в ключевой момент. Веса задаются в `[weights]` в `config.toml`. Обучения нет, и решения «отклонить» никак не влияют на будущие оценки.
 
-```bash
-# Ten best moments, with a longer lead-in
-gta6clips session.mkv -n 10 --before 8
+Для автоматических границ всегда соблюдается:
+- `0 ≤ начало < конец ≤ длительность`;
+- длина не больше `max_len`;
+- ключевой момент внутри клипа;
+- клипы не пересекаются.
 
-# Busy video with lots of noise: be stricter
-gta6clips session.mp4 -s 3
+Сначала к событию добавляется запас: `before` до него и `after` после. Затем граница сдвигается к началу или концу фразы, если клип при этом не превысит максимум. Смена сцены используется для границы, только если не режет фразу. Короткие клипы допустимы, видео никогда не растягивается.
 
-# Quiet video: be more generous
-gta6clips session.mp4 -s 1.5
+## Распознавание речи, модели, CPU и GPU
+
+- Используется [faster‑whisper](https://github.com/SYSTRAN/faster-whisper) на CTranslate2. По умолчанию это многоязычная модель `small` на CPU с `int8`. Язык речи определяется автоматически и сохраняется, а принудительно его можно задать в `speech.language`.
+- При первом анализе с включённой речью модель скачивается с Hugging Face в `gta6clips-data\models`. Для `small` это **≈480 МБ (оценка, не замер)**. Если загрузка не удалась, анализ продолжается без речи, а на странице записи указывается причина.
+- Распознавание можно отключить галочкой в интерфейсе, параметром `--no-speech` или настройкой `[speech] enabled = false`.
+- **GPU — по желанию.** Укажите `device = "auto"` или `"cuda"`. GPU используется, только если CTranslate2 видит CUDA‑устройство и модель реально на нём загрузилась. Иначе программа явно переходит на CPU. Для GPU нужны NVIDIA cuBLAS для CUDA 12 и cuDNN 9: так написано в документации faster‑whisper. Для Windows там предлагается архив библиотек из репозитория Purfview/whisper‑standalone‑win, файлы которого нужно положить в папку из `PATH`. Этот вариант не проверялся.
+- `doctor` показывает, установлен ли faster‑whisper, доступен ли VAD и сколько CUDA‑устройств видно.
+
+## Данные, кэш и повторные запуски
+
+| Что | Где |
+| --- | --- |
+| База (источники, задачи, кандидаты, решения, экспорт, оценки) | `gta6clips-data\gta6clips.sqlite3` |
+| Кэш сигналов (≈ сотни КБ на час записи) | `gta6clips-data\cache\features\` |
+| Модели речи | `gta6clips-data\models\` |
+| Клипы | `exports\` |
+| Временные файлы рендера | системная папка TEMP, удаляются после каждого клипа |
+
+- **Источник** определяется по содержимому файла: размер и SHA‑256 начала, середины и конца. Тот же файл, даже переименованный или перемещённый, не станет дубликатом. Если файл изменился, кэш его анализа перестаёт действовать.
+- **Анализ** кэшируется по ключу: отпечаток файла, версия детектора, все параметры анализа и весов, модель речи и язык, ключевые фразы, HUD‑модуль.
+- **Экспорт** определяется отпечатком источника, границами, видом кадра, обрезкой, субтитрами и настройками кодирования. Повторный экспорт с теми же настройками пропускается. «Заново» создаёт новый файл (`…_v2.mp4`), старый файл не перезаписывается никогда.
+- Клип сначала пишется во временный `*.part.mp4`. Успехом он считается только после проверки ffprobe (кодеки, 1080×1920, длительность ±0,2 с) и полного декодирования.
+- Отмена задачи останавливает процессы ffmpeg. Наполовину готовые результаты в базу не попадают, и задачу можно запустить снова. Задачи, прерванные закрытием программы, при следующем запуске помечаются как «прервано».
+
+## Решение проблем
+
+| Сообщение | Что делать |
+| --- | --- |
+| `ffmpeg не найден в PATH` | установить FFmpeg (см. выше) и открыть PowerShell заново |
+| «Файл повреждён или формат не поддерживается» | проверить файл в плеере, перекодировать или пропустить |
+| «Распознавание недоступно: модель … не загрузилась» | проверить интернет при первой загрузке либо выключить речь |
+| «Исходный файл недоступен» | вернуть файл на место или импортировать заново |
+| «Недостаточно места на диске» | освободить место на диске с папкой `exports` и TEMP |
+| Порт занят | `serve --port 8766` |
+
+## Для разработчиков
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m playwright install chromium
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe tools\measure_memory.py --minutes 10 60
 ```
 
-## How it works
+Тесты генерируют синтетические видео через FFmpeg (lavfi). Двоичные файлы в репозиторий не добавляются. Синтетика проверяет только техническую правильность, но не качество моментов.
 
-1. ffmpeg decodes the audio to mono 8 kHz PCM.
-2. The audio is split into 0.5 s windows and each window's loudness (RMS, dBFS) is measured.
-3. Windows louder than `median + sensitivity × std-dev` are marked as highlights; nearby ones are grouped.
-4. Each group is padded, clamped to the video length, overlapping clips are merged, and ffmpeg cuts them
-   (re-encoded to H.264/AAC MP4 by default for frame-accurate cuts).
+Спецификация: [docs/SPEC.md](docs/SPEC.md). Статус: [docs/STATUS.md](docs/STATUS.md).
 
-Tip: game audio works best. If your recording has loud voice chat or music mixed in,
-those will be picked up as highlights too.
+## План
 
-## Development
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-The tests generate a synthetic 60 s video with two loud bursts and check that
-exactly those two moments are cut. To make that sample yourself:
-
-```bash
-python tests/make_sample.py sample.mp4
-gta6clips sample.mp4
-```
+- **Этап 1** (текущий): локальный процесс работы и техническая проверка.
+- **Этап 2**: поиск клипов на Twitch и загрузка только разрешёнными способами.
+- **Этап 3**: оценка на реальном геймплее и улучшение ранжирования по результатам.
