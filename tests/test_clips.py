@@ -76,7 +76,7 @@ class BadInputTests(unittest.TestCase):
             bad.write_bytes(bytes(random.Random(7).getrandbits(8) for _ in range(4096)))
             code, _, err = self.run_cli(str(bad), "-o", str(Path(tmp) / "clips"))
         self.assertNotEqual(code, 0)
-        self.assertIn("error: could not read", err)
+        self.assertIn("ошибка: не удалось прочитать", err)
         self.assertNotIn("Traceback", err)
 
     def test_empty_file_gives_clear_error(self):
@@ -85,7 +85,7 @@ class BadInputTests(unittest.TestCase):
             bad.touch()
             code, _, err = self.run_cli(str(bad))
         self.assertNotEqual(code, 0)
-        self.assertTrue(err.startswith("error: "))
+        self.assertTrue(err.startswith("ошибка: "))
 
     def test_video_duration_raises_runtime_error(self):
         with tempfile.TemporaryDirectory() as tmp:
