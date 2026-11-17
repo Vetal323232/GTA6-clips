@@ -57,9 +57,9 @@ def read_loudness(video: str, window: float = 0.5) -> list[float]:
         if code != 0:
             err.seek(0)
             msg = err.read().decode(errors="replace").strip()
-            raise RuntimeError(f"ffmpeg could not read audio from {video}:\n{msg}")
+            raise RuntimeError(f"ffmpeg не смог прочитать звук из {video}:\n{msg}")
     if not levels:
-        raise RuntimeError(f"No audio track found in {video}")
+        raise RuntimeError(f"В файле {video} нет звуковой дорожки")
     return levels
 
 

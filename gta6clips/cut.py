@@ -30,14 +30,14 @@ def video_duration(video: str) -> float:
     if result.returncode != 0:
         detail = result.stderr.strip() or f"ffprobe exited with code {result.returncode}"
         raise RuntimeError(
-            f"could not read {video}. Is it a valid, non-corrupted video file?\n{detail}"
+            f"не удалось прочитать {video}. Файл повреждён или это не видео.\n{detail}"
         )
     try:
         duration = float(json.loads(result.stdout)["format"]["duration"])
     except (ValueError, KeyError, TypeError) as e:
-        raise RuntimeError(f"could not determine the length of {video} ({e})") from None
+        raise RuntimeError(f"не удалось определить длительность {video} ({e})") from None
     if duration <= 0:
-        raise RuntimeError(f"{video} has no playable length")
+        raise RuntimeError(f"у файла {video} нулевая длительность")
     return duration
 
 
@@ -91,4 +91,4 @@ def cut_clip(video: str, clip: Clip, out_path: Path, copy: bool = False) -> None
     cmd.append(str(out_path))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed cutting {out_path.name}:\n{result.stderr.strip()}")
+        raise RuntimeError(f"ffmpeg не смог вырезать {out_path.name}:\n{result.stderr.strip()}")
