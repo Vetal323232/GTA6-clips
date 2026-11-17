@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gta6clips"
+version = "0.1.0"
+description = "Automatically cut highlight clips from GTA 6 gameplay videos"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+gta6clips = "gta6clips.cli:main"
+
+[tool.setuptools]
+packages = ["gta6clips"]
