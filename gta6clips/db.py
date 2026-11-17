@@ -147,6 +147,13 @@ MIGRATIONS: list[str] = [
         created_at REAL NOT NULL
     );
     """,
+    # 2: analyses can be incomplete (an optional signal was requested but failed for a
+    # fixable reason, e.g. missing speech model) and are then retried, not reused.
+    """
+    ALTER TABLE analyses ADD COLUMN complete INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE analyses ADD COLUMN incomplete_reason TEXT;
+    ALTER TABLE analyses ADD COLUMN superseded_by INTEGER;
+    """,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

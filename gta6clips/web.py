@@ -286,6 +286,11 @@ Shift + правый клик по файлу → «Копировать как 
                               f'<td class="muted">{esc(v.get("reason"))} {esc(json.dumps(v.get("info"), ensure_ascii=False) if v.get("info") else "")}</td></tr>'
                               for k, v in st.items())
             signals = f"<h2>Сигналы последнего анализа</h2><table>{signals}</table>"
+            if not an["complete"]:
+                signals = (f'<div class="err">Анализ неполный: {esc(an["incomplete_reason"])}. После установки пакетов '
+                           f'или загрузки модели нажмите «Повторить». Звук и изображение возьмутся из кэша, '
+                           f'решения по кандидатам перенесутся.<form method="post" action="/source/{sid}/retry">'
+                           f'<button class="primary">Повторить недостающие сигналы</button></form></div>') + signals
             cands = a.candidates(an["id"])
             if cands:
                 rows = "".join(
@@ -343,6 +348,10 @@ Shift + правый клик по файлу → «Копировать как 
         ov["speech_language"] = (f.get("speech_language") or [""])[0].strip()
         jid, created = self.app.start_analysis(sid, ov)
         self.redirect(f"/source/{sid}", msg="Анализ запущен" if created else "Такой анализ уже выполняется — новая задача не создана")
+
+    def source_retry(self, sid: int):
+        jid, created = self.app.retry_analysis(sid)
+        self.redirect(f"/source/{sid}", msg="Повторный анализ запущен" if created else "Анализ уже выполняется")
 
     def source_export(self, sid: int):
         f = self.form()
@@ -582,7 +591,7 @@ ROUTES = {
     ],
     "POST": [
         (r"/import", "do_import"), (r"/source/(\d+)/analyze", "source_analyze"), (r"/source/(\d+)/meta", "source_meta"),
-        (r"/source/(\d+)/export", "source_export"), (r"/source/(\d+)/mark", "source_mark"),
+        (r"/source/(\d+)/export", "source_export"), (r"/source/(\d+)/retry", "source_retry"), (r"/source/(\d+)/mark", "source_mark"),
         (r"/candidate/(\d+)/edit", "candidate_edit"), (r"/candidate/(\d+)/reset", "candidate_reset"),
         (r"/candidate/(\d+)/review", "candidate_review"), (r"/candidate/(\d+)/layout", "candidate_layout"),
         (r"/candidate/(\d+)/export", "candidate_export"), (r"/job/(\d+)/cancel", "job_cancel"),

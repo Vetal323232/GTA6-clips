@@ -75,6 +75,10 @@ class Features:
         return f
 
 
+def vad_runtime_available() -> bool:
+    return _load_vad()[0] is not None
+
+
 def _load_vad():
     try:
         from faster_whisper.vad import VadOptions, get_speech_timestamps  # noqa: F401
@@ -149,7 +153,10 @@ def audio_pass(
     if code != 0:
         raise MediaError("ffmpeg не смог декодировать звук.\n" + ffmpeg_error_text(stderr_tail))
     rms_db = np.concatenate(levels) if levels else np.empty(0, np.float32)
-    status = SignalStatus(True, info={"segments": len(speech)}) if speech is not None else SignalStatus(False, vad_reason)
+    if speech is not None:
+        status = SignalStatus(True, info={"segments": len(speech)})
+    else:  # retryable = requested but the runtime was missing; fixed by installing it
+        status = SignalStatus(False, vad_reason, {"retryable": True} if use_vad else {})
     return rms_db, speech, status
 
 

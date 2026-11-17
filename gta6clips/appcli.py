@@ -93,8 +93,13 @@ def main(argv: list[str]) -> int:
                            "peak_rss_mb": row["peak_rss_mb"], "message": row["message"],
                            "candidates": [{k: c[k] for k in ("rank", "start", "end", "anchor", "score", "explanation")}
                                           for c in cands]})
+            report[-1]["complete"] = bool(an["complete"])
+            report[-1]["incomplete_reason"] = an["incomplete_reason"]
             if not args.json:
                 print(f"{r['name']}: {row['message']} (за {row['elapsed']:.1f} с)")
+                if not an["complete"]:
+                    print("  Анализ неполный. После исправления повторите эту же команду: "
+                          "звук и изображение возьмутся из кэша, повторится только недостающее.")
                 for c in cands:
                     print(f"  {c['rank']:2d}. {c['start']:.1f}–{c['end']:.1f} с, оценка {c['score']:.2f}")
     except KeyboardInterrupt:

@@ -171,3 +171,155 @@ class BurnedSubtitleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_FFMPEG, "ffmpeg not installed")
+class SpeechRecoveryTests(unittest.TestCase):
+    """Unavailable speech → fix setup → same analysis retried, caches and decisions reused."""
+
+    def broken_module(self):
+        class Broken(FakeModel):
+            def __init__(self, *a, **k):
+                raise OSError("модель не скачана")
+        m = types.ModuleType("faster_whisper")
+        m.WhisperModel = Broken
+        return m
+
+    def run_analysis(self, app, sid):
+        jid, _ = app.start_analysis(sid, {"vad": False, "speech_enabled": True})
+        self.assertEqual(app.jobs.wait(jid, 120), "done", app.db.one("SELECT error FROM jobs WHERE id=?", (jid,))["error"])
+        return app.db.one("SELECT * FROM jobs WHERE id=?", (jid,))
+
+    def test_unavailable_speech_then_successful_retry(self):
+        from gta6clips import app as app_module
+        with TempDir() as tmp:
+            src = tmp / "речь потом.mp4"
+            make_bursts(str(src), 40, [10, 28])
+            app = make_app(tmp, speech={"enabled": True})
+            calls = {"audio": 0, "visual": 0}
+            real_audio, real_visual = app_module.audio_pass, app_module.visual_pass
+
+            def count(name, fn):
+                def wrapper(*a, **k):
+                    calls[name] += 1
+                    return fn(*a, **k)
+                return wrapper
+
+            try:
+                with mock.patch.object(app_module, "audio_pass", count("audio", real_audio)), \
+                        mock.patch.object(app_module, "visual_pass", count("visual", real_visual)):
+                    sid = app.import_path(str(src))[0]["id"]
+                    # 1) model unavailable → analysis finishes but is marked incomplete
+                    with mock.patch.dict(sys.modules, {"faster_whisper": self.broken_module()}):
+                        job = self.run_analysis(app, sid)
+                    first = app.latest_analysis(sid)
+                    self.assertEqual(first["complete"], 0)
+                    self.assertIn("речь", first["incomplete_reason"])
+                    self.assertIn("неполный", job["message"])
+                    cands = app.candidates(first["id"])
+                    burst = min(cands, key=lambda c: abs(c["anchor"] - 10.5))
+                    app.review(burst["id"], "accepted", "хорошо")
+                    app.edit_candidate(burst["id"], burst["start"] + 1, burst["end"])
+                    self.assertEqual(calls, {"audio": 1, "visual": 1})
+
+                    # 2) still broken → no new analysis rows, old one kept
+                    with mock.patch.dict(sys.modules, {"faster_whisper": self.broken_module()}):
+                        job = self.run_analysis(app, sid)
+                    self.assertIn("Повтор не помог", job["message"])
+                    self.assertEqual(app.db.one("SELECT COUNT(*) c FROM analyses")["c"], 1)
+
+                    # 3) model works now → retried automatically with cached audio/visual
+                    with mock.patch.dict(sys.modules, {"faster_whisper": fake_module()}):
+                        job = self.run_analysis(app, sid)
+                    second = app.latest_analysis(sid)
+                    self.assertNotEqual(second["id"], first["id"])
+                    self.assertEqual(second["complete"], 1)
+                    self.assertTrue(json.loads(second["signals"])["speech"]["available"])
+                    self.assertEqual(calls, {"audio": 1, "visual": 1}, "audio/visual caches not reused")
+                    old = app.db.one("SELECT * FROM analyses WHERE id=?", (first["id"],))
+                    self.assertEqual(old["superseded_by"], second["id"])  # kept, not deleted
+                    self.assertEqual(len(app.candidates(first["id"])), len(cands))
+                    moved = min(app.candidates(second["id"]), key=lambda c: abs(c["anchor"] - burst["anchor"]))
+                    self.assertEqual((moved["status"], moved["reason"], moved["edited"]), ("accepted", "хорошо", 1))
+                    self.assertAlmostEqual(moved["start"], burst["start"] + 1, places=3)
+                    self.assertIn("Перенесено решений: 1", job["message"])
+                    self.assertTrue(app.transcript_segments(sid))
+
+                    # 4) complete result is reused as-is
+                    with mock.patch.dict(sys.modules, {"faster_whisper": fake_module()}):
+                        job = self.run_analysis(app, sid)
+                    self.assertIn("Использован сохранённый анализ", job["message"])
+                    self.assertEqual(app.db.one("SELECT COUNT(*) c FROM analyses")["c"], 2)
+                    self.assertEqual(calls, {"audio": 1, "visual": 1})
+            finally:
+                app.close()
+
+    def test_vad_retry_recomputes_audio_only(self):
+        from gta6clips import app as app_module, signals
+        with TempDir() as tmp:
+            src = tmp / "vad.mp4"
+            make_bursts(str(src), 30, [10])
+            app = make_app(tmp)
+            calls = {"audio": 0, "visual": 0}
+            real_audio, real_visual = app_module.audio_pass, app_module.visual_pass
+
+            def count(name, fn):
+                def wrapper(*a, **k):
+                    calls[name] += 1
+                    return fn(*a, **k)
+                return wrapper
+
+            missing = (None, "VAD недоступен: пакет не установлен")
+            try:
+                with mock.patch.object(app_module, "audio_pass", count("audio", real_audio)), \
+                        mock.patch.object(app_module, "visual_pass", count("visual", real_visual)):
+                    sid = app.import_path(str(src))[0]["id"]
+                    with mock.patch.object(signals, "_load_vad", return_value=missing):
+                        jid, _ = app.start_analysis(sid)
+                        app.jobs.wait(jid, 120)
+                    self.assertEqual(app.latest_analysis(sid)["complete"], 0)
+                    if not signals.vad_runtime_available():
+                        self.skipTest("faster-whisper not installed: real VAD can't recover here")
+                    jid, _ = app.start_analysis(sid)
+                    app.jobs.wait(jid, 120)
+                    an = app.latest_analysis(sid)
+                    self.assertEqual(an["complete"], 1)
+                    self.assertTrue(json.loads(an["signals"])["vad"]["available"])
+                    self.assertEqual(calls, {"audio": 2, "visual": 1})
+            finally:
+                app.close()
+
+
+@unittest.skipUnless(HAVE_FFMPEG, "ffmpeg not installed")
+class RetryButtonTests(unittest.TestCase):
+    def test_ui_shows_retry_and_starts_job(self):
+        import threading
+        import urllib.request
+        from gta6clips.web import make_server
+        with TempDir() as tmp:
+            src = tmp / "ui retry.mp4"
+            make_bursts(str(src), 20, [8])
+            app = make_app(tmp, speech={"enabled": True})
+            server = make_server(app, port=0)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                sid = app.import_path(str(src))[0]["id"]
+                broken = SpeechRecoveryTests().broken_module()
+                with mock.patch.dict(sys.modules, {"faster_whisper": broken}):
+                    jid, _ = app.start_analysis(sid, {"vad": False})
+                    app.jobs.wait(jid, 120)
+                    page = urllib.request.urlopen(f"{base}/source/{sid}").read().decode()
+                    self.assertIn("Анализ неполный", page)
+                    self.assertIn("Повторить недостающие сигналы", page)
+                with mock.patch.dict(sys.modules, {"faster_whisper": fake_module()}):
+                    req = urllib.request.Request(f"{base}/source/{sid}/retry", data=b"", method="POST")
+                    body = urllib.request.urlopen(req).read().decode()
+                    self.assertIn("Повторный анализ запущен", body)
+                    last = app.db.one("SELECT id FROM jobs ORDER BY id DESC LIMIT 1")["id"]
+                    self.assertEqual(app.jobs.wait(last, 120), "done")
+                self.assertEqual(app.latest_analysis(sid)["complete"], 1)
+            finally:
+                server.shutdown()
+                server.server_close()
+                app.close()

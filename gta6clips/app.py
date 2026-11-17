@@ -20,11 +20,11 @@ from .media import MediaError, Runner, find_videos, fingerprint, friendly_os_err
 from .ranges import manual_edit
 from .render import LAYOUTS, RENDER_VERSION, normalize_crop, render_clip
 from .scoring import DETECTOR_VERSION, HudEvent, detect, find_cues, fmt_t
-from .signals import Features, SignalStatus, audio_pass, visual_pass
-from .speech import ENGINE_VERSION, Segment, transcribe
+from .signals import Features, SignalStatus, audio_pass, vad_runtime_available, visual_pass
+from .speech import ENGINE_VERSION, Segment, runtime_available, transcribe
 from .subtitles import Cue as SubCue, clip_cues, to_srt
 
-FEATURES_VERSION = "f1"
+FEATURES_VERSION = "f2"
 
 
 def _hash(*parts: Any) -> str:
@@ -155,45 +155,92 @@ class App:
         key = _hash("job-analyze", source_id, src["fingerprint"], params)
         return self.jobs.submit("analyze", key, {"source_id": source_id, "params": params}, source_id=source_id)
 
+    def retry_analysis(self, source_id: int) -> tuple[int, bool]:
+        """Re-run the latest analysis with exactly its stored parameters (retries missing signals)."""
+        an = self.latest_analysis(source_id)
+        if an is None:
+            raise MediaError("Для этой записи ещё не было анализа")
+        params = loads(an["params"])
+        src = self.source(source_id)
+        key = _hash("job-analyze", source_id, src["fingerprint"], params)
+        return self.jobs.submit("analyze", key, {"source_id": source_id, "params": params}, source_id=source_id)
+
     def latest_analysis(self, source_id: int):
         src = self.source(source_id)
         return self.db.one("SELECT * FROM analyses WHERE source_id=? AND fingerprint=? ORDER BY id DESC LIMIT 1",
                            (source_id, src["fingerprint"]))
 
-    def _features(self, ctx: JobContext, src, a: dict) -> Features:
-        key = _hash("features", src["fingerprint"], FEATURES_VERSION, a["window"], bool(a.get("vad")),
-                    bool(a.get("visual")), a.get("visual_fps"))
-        path = self.cache_dir / "features" / f"{key[:32]}.json.gz"
-        if path.is_file():
+    def _cache_file(self, kind: str, *parts) -> Path:
+        return self.cache_dir / "features" / f"{kind}_{_hash(kind, FEATURES_VERSION, *parts)[:32]}.json.gz"
+
+    @staticmethod
+    def _read_json(path: Path) -> dict | None:
+        try:
             with gzip.open(path, "rt", encoding="utf-8") as f:
-                feats = Features.from_json(json.load(f))
-            feats.status["cache"] = SignalStatus(True, info={"features": "из кэша"})
-            return feats
+                return json.load(f)
+        except (OSError, ValueError):
+            return None  # missing or damaged cache file: recompute
+
+    @staticmethod
+    def _write_json(path: Path, data: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        with gzip.open(tmp, "wt", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+
+    def _features(self, ctx: JobContext, src, a: dict) -> Features:
+        """Audio and visual signals, cached separately per source fingerprint and parameters.
+
+        The audio cache is reused unless VAD was requested, was unavailable because its
+        runtime was missing, and the runtime is available now; then only audio is redone.
+        """
         duration = float(src["duration"])
         feats = Features(window=a["window"], duration=duration)
+        cached = []
         visual_share = 0.3 if a.get("visual") else 0.0
         if src["has_audio"]:
-            rms, speech, vad_status = audio_pass(src["path"], duration, ctx.runner, a["window"], bool(a.get("vad")),
-                                                 lambda x, m: ctx.progress(0.05 + x * (0.6 - visual_share), m))
-            feats.rms_db, feats.speech_segments = rms, speech
-            feats.status["audio"] = SignalStatus(True)
-            feats.status["vad"] = vad_status
-            if len(rms) and float(rms.max()) < -60:
-                feats.status["audio"].info["silence"] = True
+            apath = self._cache_file("audio", src["fingerprint"], a["window"], bool(a.get("vad")))
+            data = self._read_json(apath)
+            if data and data.get("vad", {}).get("info", {}).get("retryable") and vad_runtime_available():
+                data = None
+            if data:
+                cached.append("звук")
+                feats.rms_db = Features.from_json({"window": a["window"], "duration": duration,
+                                                   "rms_db": data["rms_db"]}).rms_db
+                feats.speech_segments = [tuple(x) for x in data["speech"]] if data["speech"] is not None else None
+                feats.status["audio"] = SignalStatus(True, info=data["audio"].get("info", {}))
+                feats.status["vad"] = SignalStatus(data["vad"]["available"], data["vad"].get("reason", ""),
+                                                   data["vad"].get("info", {}))
+            else:
+                rms, speech, vad_status = audio_pass(src["path"], duration, ctx.runner, a["window"], bool(a.get("vad")),
+                                                     lambda x, m: ctx.progress(0.05 + x * (0.6 - visual_share), m))
+                feats.rms_db, feats.speech_segments = rms, speech
+                feats.status["audio"] = SignalStatus(True)
+                feats.status["vad"] = vad_status
+                if len(rms) and float(rms.max()) < -60:
+                    feats.status["audio"].info["silence"] = True
+                self._write_json(apath, {"rms_db": [round(float(x), 2) for x in rms], "speech": speech,
+                                         "audio": feats.status["audio"].as_dict(), "vad": vad_status.as_dict()})
         else:
             feats.status["audio"] = SignalStatus(False, "в файле нет звуковой дорожки")
             feats.status["vad"] = SignalStatus(False, "в файле нет звуковой дорожки")
         if a.get("visual") and src["has_video"]:
-            feats.scene = visual_pass(src["path"], duration, ctx.runner, a["window"], float(a.get("visual_fps", 2)),
-                                      lambda x, m: ctx.progress(0.65 - visual_share + x * visual_share, m))
+            vpath = self._cache_file("visual", src["fingerprint"], a["window"], a.get("visual_fps"))
+            data = self._read_json(vpath)
+            if data:
+                cached.append("изображение")
+                feats.scene = Features.from_json({"window": a["window"], "duration": duration,
+                                                  "scene": data["scene"]}).scene
+            else:
+                feats.scene = visual_pass(src["path"], duration, ctx.runner, a["window"], float(a.get("visual_fps", 2)),
+                                          lambda x, m: ctx.progress(0.65 - visual_share + x * visual_share, m))
+                self._write_json(vpath, {"scene": [round(float(x), 4) for x in feats.scene]})
             feats.status["visual"] = SignalStatus(True, info={"fps": a.get("visual_fps")})
         else:
             feats.status["visual"] = SignalStatus(False, "анализ изображения отключён в настройках")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        with gzip.open(tmp, "wt", encoding="utf-8") as f:
-            json.dump(feats.to_json(), f)
-        os.replace(tmp, path)
+        if cached:
+            feats.status["cache"] = SignalStatus(True, info={"features": "из кэша: " + ", ".join(cached)})
         return feats
 
     def _transcript(self, ctx: JobContext, src, sp: dict) -> tuple[list[Segment] | None, SignalStatus]:
@@ -208,8 +255,9 @@ class App:
             ctx.progress(0.7, "Распознавание речи…")
             t = transcribe(src["path"], float(src["duration"]), sp, self.models_dir, ctx.runner,
                            lambda x, m: ctx.progress(0.7 + 0.25 * x, m))
-            if not t.available:
-                return None, SignalStatus(False, "распознавание недоступно: " + t.reason, {"notes": t.notes})
+            if not t.available:  # missing package or model: fixable, so the analysis will be retried
+                return None, SignalStatus(False, "распознавание недоступно: " + t.reason,
+                                          {"notes": t.notes, "retryable": True})
             with self.db.transaction():
                 self.db.execute("DELETE FROM transcripts WHERE cache_key=?", (key,))
                 tid = self.db.insert("transcripts", {
@@ -261,13 +309,36 @@ class App:
         src = self._refresh_source(payload["source_id"])
         key = self.cache_key(src["fingerprint"], params, src["game"])
         existing = self.db.one("SELECT * FROM analyses WHERE cache_key=?", (key,))
-        if existing:
+        if existing and existing["complete"]:
             n = self.db.one("SELECT COUNT(*) c FROM candidates WHERE analysis_id=?", (existing["id"],))["c"]
             ctx.set(signals=existing["signals"])
             return {"analysis_id": existing["id"], "candidates": n, "cached": True,
                     "message": f"Использован сохранённый анализ: кандидатов {n}"}
+        if existing:
+            old_names = {part.split(":")[0] for part in (existing["incomplete_reason"] or "").split("; ") if part}
+            recoverable = (("VAD" in old_names and vad_runtime_available())
+                           or ("речь" in old_names and runtime_available()[0]))
+            if not recoverable:  # the missing runtime is still missing: nothing to retry yet
+                n = self.db.one("SELECT COUNT(*) c FROM candidates WHERE analysis_id=?", (existing["id"],))["c"]
+                ctx.set(signals=existing["signals"])
+                return {"analysis_id": existing["id"], "candidates": n, "cached": True, "incomplete": True,
+                        "message": f"Использован сохранённый анализ: кандидатов {n}. Он неполный "
+                                   f"({existing['incomplete_reason']}); после установки недостающего "
+                                   "запустите анализ снова"}
+            ctx.progress(0.02, "Прошлый анализ неполный — повторяю недостающие сигналы")
         feats = self._features(ctx, src, a)
         segments, speech_status = self._transcript(ctx, src, sp)
+        incomplete = [x for x in (("речь", speech_status), ("VAD", feats.status.get("vad")))
+                      if x[1] is not None and not x[1].available and x[1].info.get("retryable")]
+        incomplete_reason = "; ".join(f"{name}: {st.reason}" for name, st in incomplete) or None
+        names = {n for n, _ in incomplete}
+        if existing and names and names >= old_names:  # nothing recovered: don't pile up analyses
+            self.db.update("analyses", existing["id"], {"incomplete_reason": incomplete_reason})
+            n = self.db.one("SELECT COUNT(*) c FROM candidates WHERE analysis_id=?", (existing["id"],))["c"]
+            ctx.set(signals=existing["signals"])
+            return {"analysis_id": existing["id"], "candidates": n, "cached": True, "incomplete": True,
+                    "message": f"Повтор не помог, по-прежнему недоступно — {incomplete_reason}. "
+                               f"Оставлен прежний анализ (кандидатов {n})"}
         cues = find_cues(segments, self.cfg.cues_for(src["game"])) if segments is not None else None
         hud_events, hud_status = None, SignalStatus(False, "HUD-детектор отключён (по умолчанию)")
         if params["hud"].get("enabled") and params["hud"].get("plugin"):
@@ -294,11 +365,16 @@ class App:
         cands = detect(feats, {**self.cfg, "analysis": a, "weights": params["weights"]}, segments, cues,
                        hud_events, unavailable)
         ctx.runner.check()
+        carried = (0, 0)
         with self.db.transaction():
+            if existing:  # keep the old analysis (and its decisions/exports), just free its cache key
+                self.db.execute("UPDATE analyses SET cache_key = cache_key || ':superseded:' || id WHERE id=?",
+                                (existing["id"],))
             aid = self.db.insert("analyses", {
                 "source_id": src["id"], "fingerprint": src["fingerprint"], "cache_key": key,
                 "detector_version": DETECTOR_VERSION, "params": dumps(params), "signals": dumps(statuses),
-                "job_id": ctx.job_id, "created_at": now()})
+                "job_id": ctx.job_id, "created_at": now(), "complete": 0 if incomplete_reason else 1,
+                "incomplete_reason": incomplete_reason})
             for rank, c in enumerate(cands, 1):
                 self.db.insert("candidates", {
                     "analysis_id": aid, "source_id": src["id"], "rank": rank,
@@ -306,6 +382,9 @@ class App:
                     "auto_start": round(c.rng.start, 3), "auto_end": round(c.rng.end, 3),
                     "score": round(c.rng.score, 4), "contributions": dumps(c.contributions),
                     "explanation": c.explanation, "status": "pending"})
+            if existing:
+                self.db.update("analyses", existing["id"], {"superseded_by": aid})
+                carried = self._carry_decisions(existing["id"], aid, float(src["duration"]), float(a["max_len"]))
         enabled = [k for k, v in statuses.items() if v.get("available")]
         ctx.set(signals=dumps(statuses))
         silence = statuses.get("audio", {}).get("info", {}).get("silence")
@@ -314,8 +393,42 @@ class App:
                    else "Кандидатов нет: в записи не найдено выделяющихся моментов — это нормальный результат")
         else:
             msg = f"Найдено кандидатов: {len(cands)}"
+        if existing:
+            msg = (f"Повторный анализ после неполного: {msg}. Перенесено решений: {carried[0]}"
+                   + (f", не перенесено (момент не найден): {carried[1]} — они остались в прежнем анализе"
+                      if carried[1] else ""))
+        if incomplete_reason:
+            msg += (f". Анализ неполный ({incomplete_reason}). Исправьте установку и запустите анализ снова — "
+                    "будут повторены только недостающие сигналы")
         return {"analysis_id": aid, "candidates": len(cands), "cached": False, "message": msg,
                 "signals_enabled": enabled, "analysis_seconds": round(time.monotonic() - started, 2)}
+
+    def _carry_decisions(self, old_id: int, new_id: int, duration: float, max_len: float,
+                         tolerance: float = 1.0) -> tuple[int, int]:
+        """Copy review decisions, manual boundaries and layout to the matching new candidate.
+
+        Match rule: same source, |anchor difference| <= tolerance seconds, closest first,
+        each new candidate used once. Unmatched decisions stay on the old analysis.
+        """
+        new = [dict(r) for r in self.candidates(new_id)]
+        used, moved, left = set(), 0, 0
+        for old in self.candidates(old_id):
+            if old["status"] == "pending" and not old["edited"] and not old["layout"]:
+                continue
+            best = min((n for n in new if n["id"] not in used and abs(n["anchor"] - old["anchor"]) <= tolerance),
+                       key=lambda n: abs(n["anchor"] - old["anchor"]), default=None)
+            if best is None:
+                left += 1
+                continue
+            used.add(best["id"])
+            values = {"status": old["status"], "reason": old["reason"], "reviewed_at": old["reviewed_at"],
+                      "layout": old["layout"], "crop": old["crop"], "burn_subtitles": old["burn_subtitles"]}
+            if old["edited"]:
+                s, e, flags = manual_edit(old["start"], old["end"], best["anchor"], duration, max_len)
+                values.update({"start": s, "end": e, "edited": 1, "flags": dumps(flags) if flags else None})
+            self.db.update("candidates", best["id"], values)
+            moved += 1
+        return moved, left
 
     # ------------------------------------------------------------- candidates
     def candidate(self, cid: int):
