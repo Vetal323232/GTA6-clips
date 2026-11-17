@@ -1,0 +1,15 @@
+__pycache__/
+*.egg-info/
+.venv/
+build/
+dist/
+clips/
+*.mp4
+*.mkv
+*.mov
+gta6clips-data/
+exports/
+config.toml
+*.srt
+*.part.mp4
+.env

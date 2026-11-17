@@ -1,0 +1,72 @@
+# Скопируйте этот файл в config.toml (он не попадает в git) и измените нужные значения.
+# Все ключи необязательны: пропущенные берутся по умолчанию.
+# Пути в Windows пишите с прямыми слэшами или в одинарных кавычках: 'D:\Видео\GTA'.
+
+[general]
+game = "GTA VI"                 # игра по умолчанию для новых источников
+channels = []                   # каналы Twitch — используются на Этапе 2, сейчас не применяются
+data_dir = "gta6clips-data"     # база SQLite, кэш анализа, модели речи
+output_dir = "exports"          # куда сохранять клипы
+port = 8765                     # интерфейс всегда только на 127.0.0.1
+
+[analysis]
+sensitivity = 2.0          # порог громкости относительно всей записи, в стандартных отклонениях
+rolling_window = 30.0      # окно локального фона, секунд
+rolling_threshold = 3.0    # порог относительно локального фона (робастные ст. откл.)
+onset_db = 9.0             # резкий рост громкости, дБ за ~2 с
+merge_gap = 3.0            # сигналы ближе этого — один момент
+before = 12.0              # секунд подготовки до события
+after = 8.0                # секунд последствий после события
+target_min = 20.0          # желаемая минимальная длина (короче — допустимо, видео не растягивается)
+max_len = 60.0             # жёсткий максимум длины автоматического клипа
+candidates_per_source = 10
+visual = true              # смена сцен по уменьшенному изображению (2 к/с)
+visual_fps = 2.0
+vad = true                 # определение речи и тишины (Silero, нужен requirements-speech.txt)
+speech_boundaries = true   # не резать посреди фразы, если хватает длины
+scene_boundaries = true    # совмещать начало со сменой сцены, если это не режет фразу
+
+[speech]
+enabled = true             # можно выключить; без модели анализ и экспорт всё равно работают
+model = "small"            # многоязычная модель; первая загрузка ≈480 МБ (оценка)
+device = "cpu"             # "cpu" (по умолчанию), "auto" или "cuda" — GPU только если реально запустился
+compute_type = "int8"
+language = ""              # пусто = определить автоматически (язык речи сохраняется); "ru", "en" — принудительно
+chunk_seconds = 300        # длина куска звука при распознавании (ограничивает память)
+model_dir = ""             # пусто = <data_dir>/models
+local_files_only = false   # true = не скачивать, использовать только уже загруженную модель
+
+[cues]
+ru = ["вот это да", "офигеть", "ничего себе", "погоня", "взрыв", "не может быть", "что это было", "жесть"]
+en = ["oh my god", "no way", "what the", "let's go", "insane", "clip that", "wow"]
+
+# Свои фразы для конкретной игры заменяют списки выше:
+# [cues.game_overrides."GTA VI"]
+# ru = ["розыск", "уходим"]
+
+[weights]                  # вклад сигналов в оценку кандидата
+loud_global = 1.0
+loud_rolling = 1.0
+onset = 0.7
+speech = 0.3
+cue = 1.5
+visual = 0.5
+hud = 1.0
+
+[hud]
+enabled = false            # шаблонов HUD для GTA VI нет; можно подключить свой модуль
+plugin = ""                # "мой_модуль:detect" — функция detect(path, duration, runner, cfg) -> [(время, метка, уверенность)]
+
+[export]
+width = 1080
+height = 1920
+layout = "fit_blur"        # fit_blur | crop_blur | crop_fill
+max_clips_per_run = 5
+burn_subtitles = false
+write_srt = true
+font = "Arial"             # в Windows есть кириллица; в Linux — "DejaVu Sans"
+font_size = 11
+crf = 20
+preset = "veryfast"
+loudness_lufs = -14.0
+true_peak_db = -1.5
